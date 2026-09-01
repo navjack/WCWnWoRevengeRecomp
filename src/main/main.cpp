@@ -201,6 +201,11 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
 #if defined(RT64_SDL_WINDOW_VULKAN)
     flags |= SDL_WINDOW_VULKAN;
 #endif
+#if defined(__APPLE__)
+    // RT64 renders through plume's Metal backend on macOS, so the window has to be
+    // Metal-capable for the SDL_Metal_CreateView call below.
+    flags |= SDL_WINDOW_METAL;
+#endif
     window = SDL_CreateWindow("WCW/nWo Revenge: Recompiled",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 960, flags);
     if (window == nullptr) {
@@ -211,6 +216,17 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
     SDL_GetWindowWMInfo(window, &wmInfo);
 #if defined(_WIN32)
     return ultramodern::renderer::WindowHandle{ wmInfo.info.win.window, GetCurrentThreadId() };
+#elif defined(__APPLE__)
+    // The generic branch below is correct only for Linux, where WindowHandle IS an
+    // SDL_Window*. On Apple it is { void* window; void* view; }, and both fields are used
+    // as Objective-C/Metal objects: plume::CocoaWindow sends -contentView to .window
+    // (plume_apple.mm), and plume's Metal backend casts .view straight to CA::MetalLayer*
+    // (plume_metal.cpp). Handing it the SDL_Window* makes objc_msgSend fault on startup.
+    SDL_MetalView metal_view = SDL_Metal_CreateView(window);
+    if (metal_view == nullptr) {
+        exit_error("Failed to create Metal view: %s\n", SDL_GetError());
+    }
+    return ultramodern::renderer::WindowHandle{ wmInfo.info.cocoa.window, SDL_Metal_GetLayer(metal_view) };
 #else
     return ultramodern::renderer::WindowHandle{ window };
 #endif

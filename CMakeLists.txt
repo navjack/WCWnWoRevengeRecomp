@@ -5,6 +5,22 @@
 #   cmake --build build-msvc --target RevengeRecompiled
 cmake_minimum_required(VERSION 3.20)
 project(RevengeRecompiled LANGUAGES C CXX)
+
+# --- macOS support (added for the native Mac build) ---
+# RT64/plume compile .mm sources (Metal backend, CAMetalLayer plumbing) and
+# RecompFrontend has support_apple.mm, so ObjC/ObjC++ must be live languages.
+if (APPLE)
+    enable_language(OBJC OBJCXX)
+    if (NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0")
+    endif()
+    # rt64 forces hlslpp's scalar path on Apple Silicon (see lib/rt64/src/common/rt64_hlslpp.h:
+    # "Disable SIMD on Apple Silicon due to UB when compiling with optimizations"), and that
+    # path calls labs() without including <stdlib.h>. Current SDK/libc++ headers no longer
+    # pull it in transitively, so rt64_projection.cpp fails to compile. Force-include it —
+    # the same technique this file already uses for clang-cl's /FIintrin.h on Windows.
+    add_compile_options(-include stdlib.h)
+endif()
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -81,6 +97,20 @@ set(DXC_GS_OPTS "${DXC_COMMON_OPTS}" "-E" "GSMain" "-T gs_6_0")
 set(DXC_RT_OPTS "${DXC_COMMON_OPTS}" "-D" "RT_SHADER" "-T" "lib_6_3" "-fspv-target-env=vulkan1.1spirv1.4" "-fspv-extension=SPV_KHR_ray_tracing" "-fspv-extension=SPV_EXT_descriptor_indexing")
 if (WIN32)
     set(DXC "${RT64DIR}/src/contrib/dxc/bin/x64/dxc.exe")
+elseif (APPLE)
+    # Same reason as the DXC_*_OPTS above: rt64 sets DXC in its own subdir scope, so
+    # RecompFrontend (a sibling subdir) would see it empty and emit a malformed command.
+    # Mirror rt64's Apple branch here. NOTE: rt64's arm64 branch references ZLIB_PATH
+    # without setting it (it is only computed in its x86_64 branch) — we set it for both.
+    find_library(ZLIB_LIBRARY NAMES z)
+    get_filename_component(ZLIB_PATH ${ZLIB_LIBRARY} DIRECTORY)
+    if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+        set(DXC "DYLD_LIBRARY_PATH=${RT64DIR}/src/contrib/dxc/lib/x64:${ZLIB_PATH}"
+                "${RT64DIR}/src/contrib/dxc/bin/x64/dxc-macos")
+    else()
+        set(DXC "DYLD_LIBRARY_PATH=${RT64DIR}/src/contrib/dxc/lib/arm64:${ZLIB_PATH}"
+                "${RT64DIR}/src/contrib/dxc/bin/arm64/dxc-macos")
+    endif()
 endif()
 
 # --- SDL2 (recompui/recompinput expect sdl2_SOURCE_DIR on Windows) ---
@@ -90,6 +120,14 @@ if (WIN32)
     FetchContent_Declare(sdl2
         URL https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VERSION}/SDL2-devel-${SDL2_VERSION}-VC.zip)
     FetchContent_MakeAvailable(sdl2)
+elseif (APPLE)
+    # recompui/recompinput include ${SDL2_INCLUDE_DIRS} on Apple; find_package must run
+    # before add_subdirectory(RecompFrontend) so the variable propagates into that scope.
+    find_package(SDL2 REQUIRED)
+    if (NOT SDL2_INCLUDE_DIRS AND TARGET SDL2::SDL2)
+        get_target_property(SDL2_INCLUDE_DIRS SDL2::SDL2 INTERFACE_INCLUDE_DIRECTORIES)
+    endif()
+    message(STATUS "SDL2 include dirs: ${SDL2_INCLUDE_DIRS}")
 endif()
 
 # --- RecompFrontend (recompui + recompinput) ---
@@ -164,6 +202,16 @@ if (WIN32)
             "${RT64DIR}/src/contrib/dxc/bin/x64/dxil.dll"
             "${RT64DIR}/src/contrib/dxc/bin/x64/dxcompiler.dll"
             $<TARGET_FILE_DIR:RevengeRecompiled>)
+elseif (APPLE)
+    # SDL2 comes from the system (Homebrew) rather than a vendored devel zip. The Metal
+    # backend and its frameworks are linked by rt64/plume themselves, so nothing else is
+    # needed here. No /SUBSYSTEM, /MAP, /STACK or .rc equivalents: those are MSVC-only.
+    target_include_directories(RevengeRecompiled PRIVATE ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(RevengeRecompiled PRIVATE SDL2::SDL2)
+    # Counterpart of the Windows /STACK:16777216 bump: ultramodern's gfx_thread reaches
+    # deep into graphics-device creation, and the main thread default (8 MB) is the ceiling
+    # this can raise. Thread stacks themselves are set by ultramodern.
+    target_link_options(RevengeRecompiled PRIVATE -Wl,-stack_size,0x1000000)
 endif()
 
 # Copy the runtime UI assets and SDL controller db next to the exe so a fresh build runs

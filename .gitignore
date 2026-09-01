@@ -97,3 +97,11 @@ probe*.log
 probe*.err.log
 boot-screenshot.png
 shot-*.png
+
+# --- macOS port: build artifacts, ROMs and local machine state ---
+*.app/
+N64RecompSource/
+/controls.json
+/general.json
+/graphics.json
+/sound.json
